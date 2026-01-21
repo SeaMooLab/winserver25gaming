@@ -2,6 +2,9 @@
 .SYNOPSIS
     Installs and/or repairs the core Xbox / Game Pass PC app stack on Windows Server 2025.
 
+.DESCRIPTION
+    Treats the host like Windows 11: installs missing Store-delivered components via winget and repairs AppX registrations.
+
 .AUTHOR
     DJ Stomp <85457381+DJStompZone@users.noreply.github.com>
 
@@ -15,9 +18,11 @@
     Also installs/registers the legacy Xbox Console Companion app.
 
 .EXAMPLE
+    Set-ExecutionPolicy Bypass -Scope Process
     .\Install-XboxGamingStack.ps1
 
 .EXAMPLE
+    Set-ExecutionPolicy Bypass -Scope Process
     .\Install-XboxGamingStack.ps1 -IncludeLegacyConsoleCompanion
 #>
 
@@ -59,12 +64,51 @@ function Test-CommandExists {
 
 function Get-AppxByName {
     param([Parameter(Mandatory)][string]$Name)
-    # AppX is per-user, but these apps usually get installed for the current user. We still check AllUsers to help repair cases.
     $pkgs = @(Get-AppxPackage -AllUsers -Name $Name -ErrorAction SilentlyContinue)
     if ($pkgs.Count -eq 0) {
         $pkgs = @(Get-AppxPackage -Name $Name -ErrorAction SilentlyContinue)
     }
     return $pkgs
+}
+
+function Stop-AppxPackageProcesses {
+    <#
+    .SYNOPSIS
+        Stops running processes for an AppX package (prevents 0x80073D02 "resources in use" during re-registration).
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [string]$Name
+    )
+
+    $pkgs = @(Get-AppxByName -Name $Name)
+    if ($pkgs.Count -eq 0) {
+        return
+    }
+
+    $stoppedAny = $false
+    foreach ($pkg in $pkgs) {
+        if ([string]::IsNullOrWhiteSpace($pkg.InstallLocation)) {
+            continue
+        }
+
+        $installRoot = ($pkg.InstallLocation.TrimEnd('\') + '\')
+        $procs = @(Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.Path -and $_.Path.StartsWith($installRoot, [StringComparison]::OrdinalIgnoreCase) })
+
+        foreach ($p in $procs) {
+            try {
+                Write-Log -Level 'INFO' -Message "Stopping process '$($p.Name)' (PID $($p.Id)) for '$Name'..."
+                Stop-Process -Id $p.Id -Force -ErrorAction Stop
+                $stoppedAny = $true
+            } catch {
+                Write-Log -Level 'WARN' -Message "Failed to stop process '$($p.Name)' (PID $($p.Id)) for '$Name': $($_.Exception.Message)"
+            }
+        }
+    }
+
+    if ($stoppedAny) {
+        Start-Sleep -Milliseconds 350
+    }
 }
 
 function Register-AppxPackage {
@@ -79,6 +123,8 @@ function Register-AppxPackage {
         return
     }
 
+    Stop-AppxPackageProcesses -Name $Name
+
     foreach ($pkg in $pkgs) {
         $manifestPath = Join-Path -Path $pkg.InstallLocation -ChildPath 'AppXManifest.xml'
         if (-not (Test-Path -LiteralPath $manifestPath)) {
@@ -87,7 +133,18 @@ function Register-AppxPackage {
         }
 
         Write-Log -Level 'INFO' -Message "Re-registering '$Name' from '$manifestPath'..."
-        Add-AppxPackage -DisableDevelopmentMode -Register $manifestPath -ErrorAction Stop | Out-Null
+        try {
+            Add-AppxPackage -DisableDevelopmentMode -Register $manifestPath -ErrorAction Stop | Out-Null
+        } catch {
+            $msg = $_.Exception.Message
+            if ($msg -match '0x80073D02') {
+                Write-Log -Level 'WARN' -Message "Re-register hit 0x80073D02 (in use). Re-stopping processes and retrying once..."
+                Stop-AppxPackageProcesses -Name $Name
+                Add-AppxPackage -DisableDevelopmentMode -Register $manifestPath -ErrorAction Stop | Out-Null
+            } else {
+                throw
+            }
+        }
     }
 }
 
