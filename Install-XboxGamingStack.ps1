@@ -188,3 +188,46 @@ if (-not (Test-IsAdmin)) {
 }
 
 Write-Log -Level 'INFO' -Message "Starting Xbox / Game Pass PC component install+repair..."
+
+$targets = @(
+    @{
+        PackageName = 'Microsoft.WindowsStore'
+        Label       = 'Microsoft Store'
+        WingetId    = '9WZDNCRFJBMP'
+    },
+    @{
+        PackageName = 'Microsoft.GamingApp'
+        Label       = 'Xbox app (Gaming App)'
+        WingetId    = '9MWPM2CQNLHN'
+    },
+    @{
+        PackageName = 'Microsoft.XboxIdentityProvider'
+        Label       = 'Xbox Identity Provider'
+        WingetId    = '9WZDNCRD1HKW'
+    },
+    @{
+        PackageName = 'Microsoft.XboxGamingOverlay'
+        Label       = 'Xbox Game Bar'
+        WingetId    = '9NZKPSTSNW4P'
+    }
+)
+
+if ($IncludeLegacyConsoleCompanion) {
+    $targets += @{
+        PackageName = 'Microsoft.XboxApp'
+        Label       = 'Xbox Console Companion (legacy)'
+        WingetId    = '9WZDNCRFJBD8'
+    }
+}
+
+foreach ($t in $targets) {
+    Ensure-Appx -PackageName $t.PackageName -Label $t.Label -WingetId $t.WingetId
+}
+
+Ensure-WebView2
+Ensure-VCRuntime
+
+Ensure-ServiceRunning -Name 'GamingServices'
+Ensure-ServiceRunning -Name 'GamingServicesNet'
+
+Write-Log -Level 'INFO' -Message "Done. Reboot recommended. Open Store once, then Xbox app, then sign in."
